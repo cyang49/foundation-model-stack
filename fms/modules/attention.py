@@ -13,7 +13,7 @@ from fms.distributed.tensorparallel import (
 )
 from fms.modules.positions import PositionEncoder
 from fms.modules.tp import TPModule
-
+from fms.triton.fused_attention import attention as triton_fused_attn
 
 class MultiHeadAttention(nn.Module):
     """
@@ -190,30 +190,58 @@ class MultiHeadAttention(nn.Module):
             keys_e = keys
             values_e = values
 
-        if attn_algorithm:
-            # Pick which fused attn kernels will run.
-            use_flash = attn_algorithm == "flash"
-            use_mem_efficient = attn_algorithm == "mem"
-            use_math = attn_algorithm == "math"
+        if attn_algorithm == "triton":
+            sm_scale = queries.shape[-1] ** -0.5
+            # hack: expand kv to avoid triton error (N_CTX dimension must be multiple of BLOCK_N)
+            BLOCK_M = BLOCK_N = 128
+            kv_seq_len = keys_e.shape[2]
+            if kv_seq_len % BLOCK_N != 0:
+                new_kv_seq_len = ((kv_seq_len + BLOCK_N) // BLOCK_N) * BLOCK_N
+                pad_kv = (0, 0, 0, new_kv_seq_len - kv_seq_len)
+                keys_e = F.pad(keys_e, pad_kv, "constant", 0)
+                values_e = F.pad(values_e, pad_kv, "constant", 0)
+            # hack: expand q to avoid triton error (N_CTX dimension must be multiple of BLOCK_M)
+            q_seq_len = queries.shape[2]
+            if q_seq_len % BLOCK_M != 0:
+                new_q_seq_len = ((q_seq_len + BLOCK_M) // BLOCK_M) * BLOCK_M
+                pad_q = (0, 0, 0, new_q_seq_len - q_seq_len)
+                queries = F.pad(queries, pad_q, "constant", 0)   
 
-            torch.backends.cuda.enable_flash_sdp(use_flash)
-            torch.backends.cuda.enable_mem_efficient_sdp(use_mem_efficient)
-            torch.backends.cuda.enable_math_sdp(use_math)
+            attn = triton_fused_attn(queries, 
+                                    keys_e, 
+                                    values_e, 
+                                    is_causal_mask,
+                                    sm_scale,
+            )
+            # re-adjust attn output size back
+            if q_seq_len % BLOCK_M != 0:
+                attn = attn[:, :, :q_seq_len]
 
-        attn = F.scaled_dot_product_attention(
-            queries,
-            keys_e,
-            values_e,
-            attn_mask=attn_mask,
-            dropout_p=self.p_dropout if self.training else 0.0,
-            is_causal=is_causal_mask,
-        )
+        else:
+            if attn_algorithm:
+                # Pick which fused attn kernels will run.
+                use_flash = attn_algorithm == "flash"
+                use_mem_efficient = attn_algorithm == "mem"
+                use_math = attn_algorithm == "math"
 
-        if attn_algorithm:
-            torch.backends.cuda.enable_flash_sdp(self.previous_flash)
-            torch.backends.cuda.enable_mem_efficient_sdp(self.previous_mem_efficient)
-            torch.backends.cuda.enable_math_sdp(self.previous_math)
+                torch.backends.cuda.enable_flash_sdp(use_flash)
+                torch.backends.cuda.enable_mem_efficient_sdp(use_mem_efficient)
+                torch.backends.cuda.enable_math_sdp(use_math)
 
+            attn = F.scaled_dot_product_attention(
+                queries,
+                keys_e,
+                values_e,
+                attn_mask=attn_mask,
+                dropout_p=self.p_dropout if self.training else 0.0,
+                is_causal=is_causal_mask,
+            )
+
+            if attn_algorithm:
+                torch.backends.cuda.enable_flash_sdp(self.previous_flash)
+                torch.backends.cuda.enable_mem_efficient_sdp(self.previous_mem_efficient)
+                torch.backends.cuda.enable_math_sdp(self.previous_math)
+        
         # attn: bs x seq_len x nheads*emb_v_per_head
         # attn: b x h x qlen x ds
         # attn after permute: b x qlen x h x ds

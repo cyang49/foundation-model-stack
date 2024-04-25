@@ -31,6 +31,7 @@ def generate(
     num_beams: int = 1,
     use_cache: bool = False,
     contiguous_cache: bool = False,
+    attn_algorithm: str = None,
 ):
     """
     A trivial generate function that can be used for validation/testing in
@@ -69,6 +70,7 @@ def generate(
     kwargs: MutableMapping[str, Any] = dict()
     kwargs["past_key_value_states"] = None
     kwargs["use_cache"] = use_cache
+    kwargs["attn_algorithm"] = attn_algorithm
 
     for _ in range(max_new_tokens):
         input_ids = next_input[:, -max_seq_len:]
