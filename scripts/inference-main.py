@@ -12,11 +12,6 @@ from fms.models import get_model
 from fms.utils import generation, tokenizers
 from fms.utils.generation import generate
 
-try:
-    from torch_visual_tensors.torch_hooks import TorchForwardHooks
-except:
-    print('torch_visual_tensors not installed')
-
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
 #
 # Example usage with single-GPU 7B model on slurm, with torch.compile and determinstic behavior:
@@ -109,6 +104,11 @@ parser.add_argument(
     help="batch size",
     default=16
 )
+parser.add_argument(
+    "--dump_tensor",
+    action="store_true",
+    help="Turn on tensor dumping for debug/visualization",
+)
 args = parser.parse_args()
 
 local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -178,10 +178,16 @@ if args.fp8:
     print(f"fp8 skipping layers {skip_fqn_list=}")
     model = swap_linear_with_float8_linear(model, fp8LinearDict[args.fp8_linear_type],skip_fqn_list=skip_fqn_list)
 
-if TorchForwardHooks is not None:
-    attn_type = 'torch' if args.attn_algorithm is None else args.attn_algorithm
-    print(model)
-    layer_hooks = TorchForwardHooks(model, output_dir=f'./tensors/{attn_type}')
+print(model)
+
+if args.dump_tensor:
+    try:
+        from torch_visual_tensors.torch_hooks import TorchForwardHooks
+        attn_type = 'torch' if args.attn_algorithm is None else args.attn_algorithm
+        
+        layer_hooks = TorchForwardHooks(model, output_dir=f'./tensors/{attn_type}')
+    except:
+        print('torch_visual_tensors not installed')
 
 if args.compile:
     print("compiling model")
