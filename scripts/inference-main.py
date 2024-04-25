@@ -12,6 +12,10 @@ from fms.models import get_model
 from fms.utils import generation, tokenizers
 from fms.utils.generation import generate
 
+try:
+    from torch_visual_tensors.torch_hooks import TorchForwardHooks
+except:
+    print('torch_visual_tensors not installed')
 
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
 #
@@ -173,6 +177,11 @@ if args.fp8:
         skip_fqn_list = [f"layers.{i}.ff_sub_layer.w2" for i in [1, 30]]
     print(f"fp8 skipping layers {skip_fqn_list=}")
     model = swap_linear_with_float8_linear(model, fp8LinearDict[args.fp8_linear_type],skip_fqn_list=skip_fqn_list)
+
+if TorchForwardHooks is not None:
+    attn_type = 'torch' if args.attn_algorithm is None else args.attn_algorithm
+    print(model)
+    layer_hooks = TorchForwardHooks(model, output_dir=f'./tensors/{attn_type}')
 
 if args.compile:
     print("compiling model")
