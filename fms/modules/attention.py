@@ -13,7 +13,17 @@ from fms.distributed.tensorparallel import (
 )
 from fms.modules.positions import PositionEncoder
 from fms.modules.tp import TPModule
-from fms.triton.fused_attention import attention as triton_fused_attn
+
+USE_OPENAI_FUSED_ATTN = False
+USE_IBM_FUSED_ATTN = False
+USE_ROCM_FUSED_ATTN = True # produces legible results on nv H100
+if USE_OPENAI_FUSED_ATTN:
+    from fms.triton.fused_attention import attention as triton_fused_attn
+elif USE_IBM_FUSED_ATTN:
+    from fms.triton.fused_attention_varlen import triton_wrapper_forward as triton_fused_attn
+elif USE_ROCM_FUSED_ATTN:
+    from fms.triton.rocm_fused_attention import attention as triton_fused_attn
+    from fms.triton.rocm_fused_attention import MetaData
 
 class MultiHeadAttention(nn.Module):
     """
@@ -192,31 +202,66 @@ class MultiHeadAttention(nn.Module):
 
         if attn_algorithm == "triton":
             sm_scale = queries.shape[-1] ** -0.5
-            # hack: expand kv to avoid triton error (N_CTX dimension must be multiple of BLOCK_N)
-            BLOCK_M = BLOCK_N = 128
-            kv_seq_len = keys_e.shape[2]
-            if kv_seq_len % BLOCK_N != 0:
-                new_kv_seq_len = ((kv_seq_len + BLOCK_N) // BLOCK_N) * BLOCK_N
-                pad_kv = (0, 0, 0, new_kv_seq_len - kv_seq_len)
-                keys_e = F.pad(keys_e, pad_kv, "constant", 0)
-                values_e = F.pad(values_e, pad_kv, "constant", 0)
-            # hack: expand q to avoid triton error (N_CTX dimension must be multiple of BLOCK_M)
-            q_seq_len = queries.shape[2]
-            if q_seq_len % BLOCK_M != 0:
-                new_q_seq_len = ((q_seq_len + BLOCK_M) // BLOCK_M) * BLOCK_M
-                pad_q = (0, 0, 0, new_q_seq_len - q_seq_len)
-                queries = F.pad(queries, pad_q, "constant", 0)   
+            new_kv_seq_len = kv_seq_len = keys_e.shape[2]
+            new_q_seq_len = q_seq_len = queries.shape[2]
 
-            attn = triton_fused_attn(queries, 
-                                    keys_e, 
-                                    values_e, 
-                                    is_causal_mask,
-                                    sm_scale,
-            )
-            # re-adjust attn output size back
-            if q_seq_len % BLOCK_M != 0:
-                attn = attn[:, :, :q_seq_len]
+            if USE_OPENAI_FUSED_ATTN:
+                # hack: expand kv to avoid triton error (N_CTX dimension must be multiple of BLOCK_N)
+                BLOCK_M = BLOCK_N = 128
+                if kv_seq_len % BLOCK_N != 0:
+                    new_kv_seq_len = ((kv_seq_len + BLOCK_N) // BLOCK_N) * BLOCK_N
+                    pad_kv = (0, 0, 0, new_kv_seq_len - kv_seq_len)
+                    keys_e = F.pad(keys_e, pad_kv, "constant", 0)
+                    values_e = F.pad(values_e, pad_kv, "constant", 0)
+                # hack: expand q to avoid triton error (N_CTX dimension must be multiple of BLOCK_M)
+                if q_seq_len % BLOCK_M != 0:
+                    new_q_seq_len = ((q_seq_len + BLOCK_M) // BLOCK_M) * BLOCK_M
+                    pad_q = (0, 0, 0, new_q_seq_len - q_seq_len)
+                    queries = F.pad(queries, pad_q, "constant", 0)
 
+                attn = triton_fused_attn(queries,
+                                        keys_e,
+                                        values_e,
+                                        is_causal_mask,
+                                        sm_scale,
+                )
+                # re-adjust attn output size back
+                if q_seq_len % BLOCK_M != 0:
+                    attn = attn[:, :, :q_seq_len]
+            else:
+                # ROCM fused attention that supports varlen
+                N_CTX_Q = new_q_seq_len  # The max seq len of Q in the batch
+                N_CTX_K = new_kv_seq_len # The max seq len of K in the batch
+
+                if USE_IBM_FUSED_ATTN:
+                    attn = triton_fused_attn(queries,
+                                             keys_e,
+                                             values_e,
+                                             is_causal_mask,
+                                             sm_scale,
+                                             N_CTX_Q,
+                                             N_CTX_K,
+                                             )
+                elif USE_ROCM_FUSED_ATTN: # ROCM VERSION
+                    input_metadata = MetaData(sm_scale=sm_scale)
+                    input_metadata.max_seqlens_k = N_CTX_K
+                    input_metadata.max_seqlens_q = N_CTX_Q
+                    if is_causal_mask:
+                        input_metadata.need_causal()
+                    # if use_bias:
+                    #     bias = torch.randn((1, H, N_CTX_Q, N_CTX_K), dtype=torch.float32, device="cuda")
+                    #     input_metadata.need_bias(bias, Z, H, N_CTX_Q, N_CTX_K)
+                    # else:
+                    #     bias = None
+                    # attn = torch.empty_like(queries)
+                    attn, _ = triton_fused_attn(queries,
+                                        keys_e,
+                                        values_e,
+                                        None, # q
+                                        input_metadata,
+                    )
+                else:
+                    assert False, "can't get here"
         else:
             if attn_algorithm:
                 # Pick which fused attn kernels will run.
@@ -241,7 +286,7 @@ class MultiHeadAttention(nn.Module):
                 torch.backends.cuda.enable_flash_sdp(self.previous_flash)
                 torch.backends.cuda.enable_mem_efficient_sdp(self.previous_mem_efficient)
                 torch.backends.cuda.enable_math_sdp(self.previous_math)
-        
+
         # attn: bs x seq_len x nheads*emb_v_per_head
         # attn: b x h x qlen x ds
         # attn after permute: b x qlen x h x ds
@@ -252,7 +297,6 @@ class MultiHeadAttention(nn.Module):
             .view(batch_size, q_len, self.nheads * self.emb_v_per_head)
         )
         out = self.dense(attn)
-
         # if use_cache=True, we return the hidden_state as well as the kv cache
         if use_cache:
             return out, (keys, values)
