@@ -37,9 +37,11 @@ torch_dtype:tl.constexpr = torch.float16
 #TORCH_HAS_FP8E5 = hasattr(torch, 'float8_e5m2fnuz')
 #if TORCH_HAS_FP8E5:
 #    torch_dtype:tl.constexpr = torch.float8_e5m2fnuz
-TORCH_HAS_FP8E5 = hasattr(torch, 'float8_e5m2')
-if TORCH_HAS_FP8E5:
-    torch_dtype:tl.constexpr = torch.float8_e5m2
+# # For nvidia
+TORCH_HAS_FP8E5 = False
+# TORCH_HAS_FP8E5 = hasattr(torch, 'float8_e5m2')
+# if TORCH_HAS_FP8E5:
+#     torch_dtype:tl.constexpr = torch.float8_e5m2
 
 class MetaData():
     cu_seqlens_q = None
@@ -1300,7 +1302,7 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype):
                           ])
 @pytest.mark.parametrize('causal', [True, False])
 def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
-    q, k, v, input_metadata = varlen_input_helper(Z, H, H, N_CTX, D_HEAD, dtype)
+    q, k, v, input_metadata = varlen_input_helper(Z, H, H, N_CTX, N_CTX, D_HEAD, dtype)
     tri_out = torch.empty_like(q)
     ref_out = torch.empty_like(q)
 
