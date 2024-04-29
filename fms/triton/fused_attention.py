@@ -11,7 +11,6 @@ Extra Credits:
 
 """
 
-import math
 import pytest
 import torch
 
@@ -81,33 +80,32 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     return acc, l_i, m_i
 
 
-# # We don't run auto-tuning every time to keep the tutorial fast. Uncommenting
-# # the code below and commenting out the equivalent parameters is convenient for
-# # re-tuning.
-# @triton.autotune(
-#    configs=[
-#        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_stages=2, num_warps=4),
-#        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_stages=3, num_warps=4),
-#        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_stages=4, num_warps=4),
-#     #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=4, num_warps=8),
-#     #    triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64}, num_stages=3, num_warps=8),
-#     #    triton.Config({'BLOCK_M': 256, 'BLOCK_N': 32}, num_stages=3, num_warps=8),
-#        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 32}, num_stages=3, num_warps=4),
-#        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=3, num_warps=4),
-#        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=4, num_warps=4),
-#        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=3, num_warps=4),
-#        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=4, num_warps=4),
-#     #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=3, num_warps=8),
-#     #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=7, num_warps=8),
-#     #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=7, num_warps=8),
-#     #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=6, num_warps=8),
-#     #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=5, num_warps=8),
-#     #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=4, num_warps=8),
-#     #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=6, num_warps=4),
-#    ],
-#    key=['N_CTX'],
-#    restore_value=['Out']
-# )
+## We don't run auto-tuning every time to keep the tutorial fast. Uncommenting
+## the code below and commenting out the equivalent parameters is convenient for
+## re-tuning.
+#@triton.autotune(
+#   configs=[
+#       triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_stages=2, num_warps=4),
+#       triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_stages=3, num_warps=4),
+#       triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_stages=4, num_warps=4),
+#    #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=4, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64}, num_stages=3, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 256, 'BLOCK_N': 32}, num_stages=3, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 256, 'BLOCK_N': 32}, num_stages=3, num_warps=4),
+#       triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=3, num_warps=4),
+#       triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=4, num_warps=4),
+#       triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=3, num_warps=4),
+#       triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=4, num_warps=4),
+#    #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=3, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=7, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=7, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=6, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=5, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32}, num_stages=4, num_warps=8),
+#    #    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_stages=6, num_warps=4),
+#   ],
+#   key=['N_CTX'],
+#)
 @triton.jit
 def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
               stride_qz, stride_qh, stride_qm, stride_qk,  #
@@ -551,30 +549,16 @@ class _attention(torch.autograd.Function):
 
 attention = _attention.apply
 
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
-    # (4, 48, 128, 64),
-    # (4, 48, 256, 64),
-    # (4, 48, 512, 64),
-    # (4, 48, 1024, 64),
-    # (4, 48, 2048, 64),
-    # (4, 48, 4096, 64),
-    (16, 32,  16, 128),
-    (16, 32,  32, 128),
-    (16, 32,  64, 128),
-    (16, 32, 128, 128),
-    (16, 32, 256, 128),
-    (16, 32, 512, 128),
-    #  (4, 48, 8192, 64), out of memory
-])
-@pytest.mark.skipif(torch.cuda.get_device_capability()[0] < 9, reason="requires arch 9+")
-def test_op(Z, H, N_CTX, D_HEAD, dtype=torch.float16):
+@pytest.mark.parametrize("Z, H, N_CTX, D_HEAD", [(64, 32, 128, 128)])
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("fp8_inputs", [False, True] if TORCH_HAS_FP8 else [False])
+def test_op(Z, H, N_CTX, D_HEAD, causal, fp8_inputs, dtype=torch.float16):
     torch.manual_seed(20)
-    q = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2).requires_grad_()
-    k = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2).requires_grad_()
-    v = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2).requires_grad_()
-    sm_scale = D_HEAD ** -0.5
-    causal = False
-    dout = torch.randn_like(q)
+    q = (torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    k = (torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    v = (torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    sm_scale = 0.5
+    # dout = torch.randn_like(q)
     # reference implementation
     M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
@@ -588,63 +572,32 @@ def test_op(Z, H, N_CTX, D_HEAD, dtype=torch.float16):
     # ref_dk, k.grad = k.grad.clone(), None
     # ref_dq, q.grad = q.grad.clone(), None
     # triton implementation
-    tri_out = attention(q, k, v, causal, sm_scale)
-    # print(ref_out)
-    # print(tri_out)
+    if TORCH_HAS_FP8 and fp8_inputs:
+        q = q.to(pt_fp8_type) # TODO: adjust for inference mode
+        k = k.to(pt_fp8_type)
+        v = v.permute(0, 1, 3, 2)
+        v = v.to(pt_fp8_type)
+    tri_out = attention(q, k, v, causal, sm_scale).half()
     # tri_out.backward(dout)
     # tri_dv, v.grad = v.grad.clone(), None
     # tri_dk, k.grad = k.grad.clone(), None
     # tri_dq, q.grad = q.grad.clone(), None
     # compare
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
-    # torch.testing.assert_close(ref_dq, tri_dq, atol=1e-2, rtol=0)
-    # torch.testing.assert_close(ref_dv, tri_dv, atol=1e-2, rtol=0)
-    # torch.testing.assert_close(ref_dk, tri_dk, atol=1e-2, rtol=0)
-    # print(f"{ref_out[0][0][0]=}")
-    # print(f"{ref_out.shape=}")
-    # print(f"{tri_out[0][0][0]=}")
+    # print(f"{tri_out.dtype=}")
     # print(f"{tri_out.shape=}")
-
-# @pytest.mark.parametrize("Z, H, N_CTX, D_HEAD", [(1, 2, 1024, 64)])
-# @pytest.mark.parametrize("causal", [True])
-# def test_op(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
-#     torch.manual_seed(20)
-#     q = (torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#     k = (torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#     v = (torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-#     sm_scale = 0.5
-#     dout = torch.randn_like(q)
-#     # reference implementation
-#     M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
-#     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-#     if causal:
-#         p[:, :, M == 0] = float("-inf")
-#     p = torch.softmax(p.float(), dim=-1).half()
-#     # p = torch.exp(p)
-#     ref_out = torch.matmul(p, v)
-#     ref_out.backward(dout)
-#     ref_dv, v.grad = v.grad.clone(), None
-#     ref_dk, k.grad = k.grad.clone(), None
-#     ref_dq, q.grad = q.grad.clone(), None
-#     # triton implementation
-#     tri_out = attention(q, k, v, causal, sm_scale).half()
-#     tri_out.backward(dout)
-#     tri_dv, v.grad = v.grad.clone(), None
-#     tri_dk, k.grad = k.grad.clone(), None
-#     tri_dq, q.grad = q.grad.clone(), None
-#     # compare
-#     assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
-#     rtol = 0.0
-#     # Relative tolerance workaround for known hardware limitation of MI200 GPU.
-#     # For detailss see https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
-#     if torch.version.hip is not None and triton.runtime.driver.active.get_current_target()[1] == "gfx90a":
-#         rtol = 1e-2
-#     assert torch.allclose(ref_dv, tri_dv, atol=1e-2, rtol=rtol)
-#     assert torch.allclose(ref_dk, tri_dk, atol=1e-2, rtol=rtol)
-#     assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=rtol)
-#     print(ref_out)
-#     print(f"{ref_out.shape=}")
-#     print(f"{tri_out.shape=}")
+    # print(f"{tri_out[0][0][0]=}")
+    # print(f"{ref_out.dtype=}")
+    # print(f"{ref_out.shape=}")
+    # print(f"{ref_out[0][0][0]=}")
+    assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
+    # rtol = 0.0
+    # # Relative tolerance workaround for known hardware limitation of MI200 GPU.
+    # # For detailss see https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
+    # if torch.version.hip is not None and triton.runtime.driver.active.get_current_target()[1] == "gfx90a":
+    #     rtol = 1e-2
+    # assert torch.allclose(ref_dv, tri_dv, atol=1e-2, rtol=rtol)
+    # assert torch.allclose(ref_dk, tri_dk, atol=1e-2, rtol=rtol)
+    # assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=rtol)
 
 
 try:
@@ -659,8 +612,8 @@ except BaseException:
 # BATCH,  N_CTX = 4, 4096
 # N_HEADS = 32
 # D_HEAD = HIDDEN // N_HEADS # D_HEAD < 64 in fp8 significantly decreases throughput
-HIDDEN = 2048 # HIDDEN = N_HEADS * D_HEAD
-BATCH,  N_CTX = 4, 4096
+HIDDEN = 4096 # HIDDEN = N_HEADS * D_HEAD
+BATCH,  N_CTX = 4, 256
 N_HEADS = 32
 D_HEAD = HIDDEN // N_HEADS # D_HEAD < 64 in fp8 significantly decreases throughput
 # vary seq length for fixed head and batch=4
