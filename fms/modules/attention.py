@@ -13,6 +13,7 @@ from fms.distributed.tensorparallel import (
 )
 from fms.modules.positions import PositionEncoder
 from fms.modules.tp import TPModule
+from flashinfer import single_decode_with_kv_cache, batch_decode_with_padded_kv_cache
 
 USE_OPENAI_FUSED_ATTN = False
 USE_IBM_FUSED_ATTN = False
@@ -24,6 +25,7 @@ elif USE_IBM_FUSED_ATTN:
 elif USE_ROCM_FUSED_ATTN:
     from fms.triton.rocm_fused_attention import attention as triton_fused_attn
     from fms.triton.rocm_fused_attention import MetaData
+USE_FP8_DECODE=True
 
 class MultiHeadAttention(nn.Module):
     """
@@ -263,29 +265,45 @@ class MultiHeadAttention(nn.Module):
                 else:
                     assert False, "can't get here"
         else:
-            if attn_algorithm:
-                # Pick which fused attn kernels will run.
-                use_flash = attn_algorithm == "flash"
-                use_mem_efficient = attn_algorithm == "mem"
-                use_math = attn_algorithm == "math"
+            if q_len > 1: # Use flash attn for prefill only
+                if attn_algorithm:
+                    # Pick which fused attn kernels will run.
+                    use_flash = attn_algorithm == "flash"
+                    use_mem_efficient = attn_algorithm == "mem"
+                    use_math = attn_algorithm == "math"
 
-                torch.backends.cuda.enable_flash_sdp(use_flash)
-                torch.backends.cuda.enable_mem_efficient_sdp(use_mem_efficient)
-                torch.backends.cuda.enable_math_sdp(use_math)
+                    torch.backends.cuda.enable_flash_sdp(use_flash)
+                    torch.backends.cuda.enable_mem_efficient_sdp(use_mem_efficient)
+                    torch.backends.cuda.enable_math_sdp(use_math)
 
-            attn = F.scaled_dot_product_attention(
-                queries,
-                keys_e,
-                values_e,
-                attn_mask=attn_mask,
-                dropout_p=self.p_dropout if self.training else 0.0,
-                is_causal=is_causal_mask,
-            )
+                attn = F.scaled_dot_product_attention(
+                    queries,
+                    keys_e,
+                    values_e,
+                    attn_mask=attn_mask,
+                    dropout_p=self.p_dropout if self.training else 0.0,
+                    is_causal=is_causal_mask,
+                )
 
-            if attn_algorithm:
-                torch.backends.cuda.enable_flash_sdp(self.previous_flash)
-                torch.backends.cuda.enable_mem_efficient_sdp(self.previous_mem_efficient)
-                torch.backends.cuda.enable_math_sdp(self.previous_math)
+                if attn_algorithm:
+                    torch.backends.cuda.enable_flash_sdp(self.previous_flash)
+                    torch.backends.cuda.enable_mem_efficient_sdp(self.previous_mem_efficient)
+                    torch.backends.cuda.enable_math_sdp(self.previous_math)
+            else: # Use flashinfer for decode
+                # remove seq_len dimension from queries
+                queries = torch.squeeze(queries)
+                if USE_FP8_DECODE:
+                    queries = queries.to(torch.float8_e5m2)
+                    keys_e = keys_e.to(torch.float8_e5m2)
+                    values_e = values_e.to(torch.float8_e5m2)
+                # attn: b x h x ds
+                attn = batch_decode_with_padded_kv_cache(
+                    queries,
+                    keys_e,
+                    values_e,
+                    kv_layout='HND',
+                )
+                attn = attn.unsqueeze(2)
 
         # attn: bs x seq_len x nheads*emb_v_per_head
         # attn: b x h x qlen x ds

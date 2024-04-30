@@ -105,8 +105,15 @@ parser.add_argument(
     default=16
 )
 parser.add_argument(
+    "--max_new_tokens",
+    type=int,
+    help="max number of new output tokens",
+    default=128
+)
+parser.add_argument(
     "--dump_tensor",
-    action="store_true",
+    type=str,
+    default=None,
     help="Turn on tensor dumping for debug/visualization",
 )
 args = parser.parse_args()
@@ -180,12 +187,12 @@ if args.fp8:
 
 print(model)
 
-if args.dump_tensor:
+if args.dump_tensor is not None:
     try:
         from torch_visual_tensors.torch_hooks import TorchForwardHooks
         attn_type = 'torch' if args.attn_algorithm is None else args.attn_algorithm
         
-        layer_hooks = TorchForwardHooks(model, output_dir=f'./tensors/{attn_type}')
+        layer_hooks = TorchForwardHooks(model, output_dir=f'./tensors/{args.dump_tensor}')
     except:
         print('torch_visual_tensors not installed')
 
@@ -276,7 +283,7 @@ def infer(use_cache, do_sample):
     result = generate(
         model,
         ids,
-        max_new_tokens=128,
+        max_new_tokens=args.max_new_tokens,
         use_cache=use_cache,
         do_sample=do_sample,
         max_seq_len=max_seq_len,
