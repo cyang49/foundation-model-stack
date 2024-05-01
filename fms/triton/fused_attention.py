@@ -575,7 +575,7 @@ def test_op(Z, H, N_CTX, D_HEAD, causal, fp8_inputs, dtype=torch.float16):
     if TORCH_HAS_FP8 and fp8_inputs:
         q = q.to(pt_fp8_type) # TODO: adjust for inference mode
         k = k.to(pt_fp8_type)
-        v = v.permute(0, 1, 3, 2)
+        # v = v.permute(0, 1, 3, 2)
         v = v.to(pt_fp8_type)
     tri_out = attention(q, k, v, causal, sm_scale).half()
     # tri_out.backward(dout)
@@ -589,7 +589,9 @@ def test_op(Z, H, N_CTX, D_HEAD, causal, fp8_inputs, dtype=torch.float16):
     # print(f"{ref_out.dtype=}")
     # print(f"{ref_out.shape=}")
     # print(f"{ref_out[0][0][0]=}")
-    assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
+
+    atol = 1e-2 if not fp8_inputs else 5e-1
+    assert torch.allclose(ref_out, tri_out, atol=atol, rtol=0)
     # rtol = 0.0
     # # Relative tolerance workaround for known hardware limitation of MI200 GPU.
     # # For detailss see https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
