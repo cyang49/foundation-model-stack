@@ -13,11 +13,19 @@ from fms.distributed.tensorparallel import (
 )
 from fms.modules.positions import PositionEncoder
 from fms.modules.tp import TPModule
-from flashinfer import single_decode_with_kv_cache, batch_decode_with_padded_kv_cache
+
+HAS_FLASHINFER = False
+try:
+    from flashinfer import single_decode_with_kv_cache, batch_decode_with_padded_kv_cache
+    HAS_FLASHINFER = True
+except:
+    pass
+USE_FLASHINFER_FP8_DECODE=False and HAS_FLASHINFER
 
 USE_OPENAI_FUSED_ATTN = False
 USE_IBM_FUSED_ATTN = False
 USE_ROCM_FUSED_ATTN = True # produces legible results on nv H100
+USE_TRIDAO_TRITON_FUSED_ATTN = False # does not produce legible results on nv H100
 if USE_OPENAI_FUSED_ATTN:
     from fms.triton.fused_attention import attention as triton_fused_attn
 elif USE_IBM_FUSED_ATTN:
@@ -25,7 +33,8 @@ elif USE_IBM_FUSED_ATTN:
 elif USE_ROCM_FUSED_ATTN:
     from fms.triton.rocm_fused_attention import attention as triton_fused_attn
     from fms.triton.rocm_fused_attention import MetaData
-USE_FP8_DECODE=True
+elif USE_TRIDAO_TRITON_FUSED_ATTN:
+    from fms.triton.tridao_fused_attention import flash_attn_func as triton_fused_attn
 
 class MultiHeadAttention(nn.Module):
     """
@@ -259,13 +268,24 @@ class MultiHeadAttention(nn.Module):
                     attn, _ = triton_fused_attn(queries,
                                         keys_e,
                                         values_e,
-                                        None, # q
+                                        None, # output
                                         input_metadata,
                     )
+                elif USE_TRIDAO_TRITON_FUSED_ATTN: # NOTE: this path doesn't produce correct results (H100, Triton 3.0)
+                    # Input tensors are b h q d but Tridao triton flash attn expects b, q, h, d
+                    queries = torch.einsum('bhqd->bqhd', queries).contiguous()
+                    keys_e = torch.einsum('bhqd->bqhd', keys_e).contiguous()
+                    values_e = torch.einsum('bhqd->bqhd', values_e).contiguous()
+                    attn = triton_fused_attn(queries,
+                                             keys_e,
+                                             values_e,
+                                             None, # bias
+                                             is_causal_mask,
+                                             )
                 else:
                     assert False, "can't get here"
         else:
-            if q_len > 1: # Use flash attn for prefill only
+            if not USE_FLASHINFER_FP8_DECODE or q_len > 1: # Use flash attn for prefill only
                 if attn_algorithm:
                     # Pick which fused attn kernels will run.
                     use_flash = attn_algorithm == "flash"
@@ -292,10 +312,10 @@ class MultiHeadAttention(nn.Module):
             else: # Use flashinfer for decode
                 # remove seq_len dimension from queries
                 queries = torch.squeeze(queries)
-                if USE_FP8_DECODE:
-                    queries = queries.to(torch.float8_e5m2)
-                    keys_e = keys_e.to(torch.float8_e5m2)
-                    values_e = values_e.to(torch.float8_e5m2)
+                # if USE_FP8_DECODE:
+                queries = queries.to(torch.float8_e5m2)
+                keys_e = keys_e.to(torch.float8_e5m2)
+                values_e = values_e.to(torch.float8_e5m2)
                 # attn: b x h x ds
                 attn = batch_decode_with_padded_kv_cache(
                     queries,
