@@ -452,13 +452,13 @@ empty = torch.empty(128, device="cuda")
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale):
+    def forward(ctx, q, k, v, causal, sm_scale, out_dtype=torch.float16):
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         # when v is in float8_e5m2 it is transposed.
         assert Lq == Lk and (Lk == Lv or v.dtype == pt_fp8_type)
         assert Lk in {16, 32, 64, 128, 256}
-        o = torch.empty_like(q)
+        o = torch.empty_like(q, dtype=out_dtype)
         BLOCK_M = 128
         BLOCK_N = 64 if Lk <= 64 else 32
         num_stages = 4 if Lk <= 64 else 3
@@ -577,7 +577,7 @@ def test_op(Z, H, N_CTX, D_HEAD, causal, fp8_inputs, dtype=torch.float16):
         k = k.to(pt_fp8_type)
         # v = v.permute(0, 1, 3, 2)
         v = v.to(pt_fp8_type)
-    tri_out = attention(q, k, v, causal, sm_scale).half()
+    tri_out = attention(q, k, v, causal, sm_scale)
     # tri_out.backward(dout)
     # tri_dv, v.grad = v.grad.clone(), None
     # tri_dk, k.grad = k.grad.clone(), None
