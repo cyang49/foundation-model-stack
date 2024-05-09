@@ -34,14 +34,17 @@ import triton.language as tl
 
 torch_dtype:tl.constexpr = torch.float16
 
-#TORCH_HAS_FP8E5 = hasattr(torch, 'float8_e5m2fnuz')
-#if TORCH_HAS_FP8E5:
-#    torch_dtype:tl.constexpr = torch.float8_e5m2fnuz
-# # For nvidia
-TORCH_HAS_FP8E5 = False
-# TORCH_HAS_FP8E5 = hasattr(torch, 'float8_e5m2')
+# # For AMD
+# TORCH_HAS_FP8E5 = hasattr(torch, 'float8_e5m2fnuz')
 # if TORCH_HAS_FP8E5:
-#     torch_dtype:tl.constexpr = torch.float8_e5m2
+#     torch_dtype:tl.constexpr = torch.float8_e5m2fnuz
+# # For nvidia
+TORCH_HAS_FP8E5 = True
+TORCH_HAS_FP8E5 = hasattr(torch, 'float8_e5m2')
+if TORCH_HAS_FP8E5:
+    torch_dtype:tl.constexpr = torch.float8_e5m2
+
+DEFAULT_PADDING_OPTION="" # FIXME: Temporary solution for FP8
 
 class MetaData():
     cu_seqlens_q = None
@@ -114,7 +117,7 @@ class MetaData():
         assert k.shape == v.shape
         assert q.shape[-1] == k.shape[-1] and q.shape[-1] == v.shape[-1]
         # TODO: Change assert if we support qkl f8 and v f16
-        assert q.dtype == k.dtype and q.dtype == v.dtype
+        assert q.dtype == k.dtype #and q.dtype == v.dtype
         assert head_size <= 256
         assert o.shape == q.shape
         assert (nheads_q % nheads_k) == 0
@@ -147,14 +150,15 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
 
 @triton.jit
 def load_fn(block_ptr, first, second, pad):
-    if first and second:
-        tensor = tl.load(block_ptr, boundary_check=(0,1), padding_option=pad)
-    elif first:
-        tensor = tl.load(block_ptr, boundary_check=(0,), padding_option=pad)
-    elif second:
-        tensor = tl.load(block_ptr, boundary_check=(1,), padding_option=pad)
-    else:
-        tensor = tl.load(block_ptr)
+    # pad = "" # avoid compiler bug
+    # if first and second:
+    #     tensor = tl.load(block_ptr, boundary_check=(0,1), padding_option=pad)
+    # elif first:
+    #     tensor = tl.load(block_ptr, boundary_check=(0,), padding_option=pad)
+    # elif second:
+    #     tensor = tl.load(block_ptr, boundary_check=(1,), padding_option=pad)
+    # else:
+    tensor = tl.load(block_ptr)
     return tensor
 
 @triton.jit
@@ -190,9 +194,9 @@ def _attn_fwd_inner(
     for start_n in range (block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
-        k = load_fn(K_block_ptr, PADDED_HEAD, MASK_STEPS and (n_extra_tokens != 0), "zero")
+        k = load_fn(K_block_ptr, PADDED_HEAD, MASK_STEPS and (n_extra_tokens != 0), DEFAULT_PADDING_OPTION)
         if PRE_LOAD_V:
-            v = load_fn(V_block_ptr, MASK_STEPS and (n_extra_tokens != 0), PADDED_HEAD, "zero")
+            v = load_fn(V_block_ptr, MASK_STEPS and (n_extra_tokens != 0), PADDED_HEAD, DEFAULT_PADDING_OPTION)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
@@ -215,7 +219,7 @@ def _attn_fwd_inner(
         # -- compute qk ----
         qk += tl.dot(q, k)
         if bias_ptr is not None:
-            bias = load_fn(bias_ptr, False, MASK_STEPS and (n_extra_tokens != 0), "zero")
+            bias = load_fn(bias_ptr, False, MASK_STEPS and (n_extra_tokens != 0), DEFAULT_PADDING_OPTION)
             # While bias is added after multiplying qk with sm_scale,
             # our optimization to use 2^x instead of e^x results in an additional
             # scale factor of log2(e) which we must also multiply the bias with.
@@ -254,7 +258,7 @@ def _attn_fwd_inner(
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
         if not PRE_LOAD_V:
-            v = load_fn(V_block_ptr, MASK_STEPS and (n_extra_tokens != 0), PADDED_HEAD, "zero")
+            v = load_fn(V_block_ptr, MASK_STEPS and (n_extra_tokens != 0), PADDED_HEAD, DEFAULT_PADDING_OPTION)
         # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
@@ -292,7 +296,7 @@ def _attn_fwd_inner(
        #triton.Config({'BLOCK_M': 16,  'BLOCK_N': 16,  'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
    ],
    key=['hq', 'hk', 'IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
-   use_cuda_graph=True,
+#    use_cuda_graph=True,
 )
 @triton.jit
 def attn_fwd(
@@ -469,7 +473,7 @@ def attn_fwd(
     # have native e^x support in HW.
     qk_scale = sm_scale * 1.44269504089
     # Q is loaded once at the beginning and shared by all N blocks.
-    q = load_fn(Q_block_ptr, True, padded_head, "zero")
+    q = load_fn(Q_block_ptr, True, padded_head, DEFAULT_PADDING_OPTION)
     q = (q * qk_scale).to(Q_block_ptr.type.element_ty)
 
     # Here we compute how many full and masked blocks we have.
@@ -576,377 +580,6 @@ def attn_fwd(
     # TODO: Do the boundary check optionally.
     tl.store(O_block_ptr, acc, boundary_check=(0,1))
 
-@triton.jit
-def _attn_bwd_preprocess(
-    Out, DO,
-    Delta,
-    stride_oz, stride_oh, stride_om, stride_on,
-    stride_doz, stride_doh, stride_dom, stride_don,
-    seqlen_q,
-    head_dim,
-    BLOCK_M: tl.constexpr,
-    D_HEAD: tl.constexpr,
-):
-    # off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    # off_n = tl.arange(0, D_HEAD)
-    off_m = tl.program_id(0) * BLOCK_M
-    off_h = tl.program_id(1) # head index
-    off_z = tl.program_id(2) # batch index
-    num_h = tl.num_programs(1)
-    o_offset = off_h * stride_oh + off_z * stride_oz
-    O_block_ptr = tl.make_block_ptr(
-        base=Out + o_offset,
-        shape=(seqlen_q, head_dim),
-        strides=(stride_om, stride_on),
-        offsets=(off_m, 0),
-        block_shape=(BLOCK_M, D_HEAD),
-        order=(1, 0)
-    )
-    do_offset = off_h * stride_doh + off_z * stride_doz
-    DO_block_ptr = tl.make_block_ptr(
-        base=DO + do_offset,
-        shape=(seqlen_q, head_dim),
-        strides=(stride_dom, stride_don),
-        offsets=(off_m, 0),
-        block_shape=(BLOCK_M, D_HEAD),
-        order=(1, 0)
-    )
-    # load
-    # o = tl.load(Out + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
-    # do = tl.load(DO + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
-    o = tl.load(O_block_ptr, boundary_check=(0,1), padding_option="zero").to(tl.float32)
-    do = tl.load(DO_block_ptr, boundary_check=(0,1), padding_option="zero").to(tl.float32)
-    # compute
-    delta = tl.sum(o * do, axis=1)
-    # write-back, shape (q.shape[0] * q.shape[1], q.shape[2])
-    off_zh = off_z * num_h + off_h * 1
-    # Check for OOB accesses
-    delta_ptrs = Delta + off_zh * seqlen_q + off_m + tl.arange(0, BLOCK_M)
-    overflow = off_m + BLOCK_M - seqlen_q
-    if overflow > 0:
-        boundary = tl.full((BLOCK_M, ), BLOCK_M - overflow, dtype=tl.int32)
-        mask = boundary > tl.arange(0, BLOCK_M)
-        tl.store(delta_ptrs, delta, mask=mask)
-    else:
-        tl.store(delta_ptrs, delta)
-
-@triton.jit
-def _bwd_kernel_dk_dv(
-                   dk, dv,
-                   Q, k, v, sm_scale,
-                   DO,
-                   M, D,
-                   # shared by Q/K/V/DO.
-                   stride_tok, stride_d,
-                   H, N_CTX, BLOCK_M1: tl.constexpr,
-                   BLOCK_N1: tl.constexpr,
-                   BLOCK_DMODEL: tl.constexpr,
-                   # Filled in by the wrapper.
-                   start_n, start_m, num_steps,
-                   MASK: tl.constexpr):
-    offs_m = start_m + tl.arange(0, BLOCK_M1)
-    offs_n = start_n + tl.arange(0, BLOCK_N1)
-    offs_k = tl.arange(0, BLOCK_DMODEL)
-    QT_block_ptr = tl.make_block_ptr(
-        base=Q,
-        shape=(BLOCK_DMODEL, N_CTX),
-        strides=(stride_d, stride_tok),
-        offsets=(0, start_m),
-        block_shape=(BLOCK_DMODEL, BLOCK_M1),
-        order=(0,1)
-    )
-    DO_block_ptr = tl.make_block_ptr(
-        base=DO,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_m, 0),
-        block_shape=(BLOCK_M1, BLOCK_DMODEL),
-        order=(1,0)
-    )
-    # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
-    tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
-    curr_m = start_m
-    step_m = BLOCK_M1
-    for blk_idx in range(num_steps):
-        qT = tl.load(QT_block_ptr)
-        # Load m before computing qk to reduce pipeline stall.
-        offs_m = curr_m + tl.arange(0, BLOCK_M1)
-        m = tl.load(M + offs_m)
-        qkT = tl.dot(k, qT)
-        pT = tl.math.exp2(qkT - m[None, :])
-        # Autoregressive masking.
-        if MASK:
-            mask = (offs_m[None, :] >= offs_n[:, None])
-            pT = tl.where(mask, pT, 0.0)
-        do = tl.load(DO_block_ptr)
-        # Compute dV.
-        ppT = pT
-        ppT = ppT.to(tl.float16)
-        dv += tl.dot(ppT, do)
-        # D (= delta) is pre-divided by ds_scale.
-        Di = tl.load(D + offs_m)
-        # Compute dP and dS.
-        dpT = tl.dot(v, tl.trans(do))
-        dsT = pT * (dpT - Di[None, :])
-        dsT = dsT.to(tl.float16)
-        dk += tl.dot(dsT, tl.trans(qT))
-        # Increment pointers.
-        curr_m += step_m
-        QT_block_ptr = tl.advance(QT_block_ptr, (0, step_m))
-        DO_block_ptr = tl.advance(DO_block_ptr, (step_m, 0))
-    return dk, dv
-
-@triton.jit
-def _bwd_kernel_dq(dq, q, K, V,
-                 do, m, D,
-                 # shared by Q/K/V/DO.
-                 stride_tok, stride_d,
-                 H, N_CTX,
-                 BLOCK_M2: tl.constexpr,
-                 BLOCK_N2: tl.constexpr,
-                 BLOCK_DMODEL: tl.constexpr,
-                 # Filled in by the wrapper.
-                 start_m, start_n, num_steps,
-                 MASK: tl.constexpr):
-    offs_m = start_m + tl.arange(0, BLOCK_M2)
-    offs_n = start_n + tl.arange(0, BLOCK_N2)
-    offs_k = tl.arange(0, BLOCK_DMODEL)
-    KT_block_ptr = tl.make_block_ptr(
-        base=K,
-        shape=(BLOCK_DMODEL, N_CTX),
-        strides=(stride_d, stride_tok),
-        offsets=(0, start_n),
-        block_shape=(BLOCK_DMODEL, BLOCK_N2),
-        order=(0, 1)
-    )
-    VT_block_ptr = tl.make_block_ptr(
-        base=V,
-        shape=(BLOCK_DMODEL, N_CTX),
-        strides=(stride_d, stride_tok),
-        offsets=(0, start_n),
-        block_shape=(BLOCK_DMODEL, BLOCK_N2),
-        order=(0, 1)
-    )
-    # D (= delta) is pre-divided by ds_scale.
-    Di = tl.load(D + offs_m)
-    # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
-    tl.static_assert(BLOCK_M2 % BLOCK_N2 == 0)
-    curr_n = start_n
-    step_n = BLOCK_N2
-    for blk_idx in range(num_steps):
-        kT = tl.load(KT_block_ptr)
-        qk = tl.dot(q, kT)
-        p = tl.math.exp2(qk - m)
-        # Autoregressive masking.
-        if MASK:
-            offs_n = curr_n + tl.arange(0, BLOCK_N2)
-            mask = (offs_m[:, None] >= offs_n[None, :])
-            p = tl.where(mask, p, 0.0)
-        # Compute dP and dS.
-        vT = tl.load(VT_block_ptr)
-        dp = tl.dot(do, vT).to(tl.float32)
-        ds = p * (dp - Di[:, None])
-        ds = ds.to(tl.float16)
-        # Compute dQ.0.
-        # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
-        dq += tl.dot(ds, tl.trans(kT))
-        # Increment pointers.
-        curr_n += step_n
-        KT_block_ptr = tl.advance(KT_block_ptr, (0, step_n))
-        VT_block_ptr = tl.advance(VT_block_ptr, (0, step_n))
-    return dq
-
-@triton.jit
-def _attn_bwd(Q, K, V, sm_scale,
-              DO,
-              DQ, DK, DV,
-              M, D,
-              # shared by Q/K/V/DO.
-              stride_z, stride_h, stride_tok, stride_d,
-              # H = 16, N_CTX = 1024
-              H, N_CTX,
-              BLOCK_DMODEL: tl.constexpr,
-              BLOCK_M1: tl.constexpr,
-              BLOCK_N1: tl.constexpr,
-              BLOCK_M2: tl.constexpr,
-              BLOCK_N2: tl.constexpr,
-              BLK_SLICE_FACTOR: tl.constexpr):
-    LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
-
-    bhid = tl.program_id(2)
-    off_chz = (bhid * N_CTX).to(tl.int64)
-    adj = (stride_h * (bhid % H) + stride_z * (bhid // H)).to(tl.int64)
-    pid = tl.program_id(0)
-
-    # offset pointers for batch/head
-    Q += adj
-    K += adj
-    V += adj
-    DO += adj
-    DQ += adj
-    DK += adj
-    DV += adj
-    M += off_chz
-    D += off_chz
-
-    offs_k = tl.arange(0, BLOCK_DMODEL)
-
-    start_n = pid * BLOCK_N1
-    # This assignment is important. It is what allows us to pick the diagonal
-    # blocks. Later, when we want to do the lower triangular, we update start_m
-    # after the first dkdv call.
-    start_m = start_n
-
-    MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR
-    offs_n = start_n + tl.arange(0, BLOCK_N1)
-
-    dv = tl.zeros([BLOCK_N1, BLOCK_DMODEL], dtype=tl.float32)
-    dk = tl.zeros([BLOCK_N1, BLOCK_DMODEL], dtype=tl.float32)
-
-    K_block_ptr = tl.make_block_ptr(
-        base=K,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_n, 0),
-        block_shape=(BLOCK_N1, BLOCK_DMODEL),
-        order=(1, 0),
-    )
-    V_block_ptr = tl.make_block_ptr(
-        base=V,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_n, 0),
-        block_shape=(BLOCK_N1, BLOCK_DMODEL),
-        order=(1, 0),
-    )
-
-    # load K and V: they stay in SRAM throughout the inner loop for dkdv.
-    k = tl.load(K_block_ptr)
-    v = tl.load(V_block_ptr)
-
-    num_steps = BLOCK_N1 // MASK_BLOCK_M1
-    
-    dk, dv = _bwd_kernel_dk_dv(
-                            dk, dv,
-                            Q, k, v, sm_scale,
-                            DO,
-                            M, D,
-                            stride_tok, stride_d,
-                            H, N_CTX,
-                            MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL,
-                            start_n, start_m, num_steps,
-                            MASK=True
-                            )
-
-    start_m += num_steps * MASK_BLOCK_M1
-    num_steps = (N_CTX - start_m) // BLOCK_M1
-
-    # Compute dK and dV for non-masked blocks.
-    dk, dv = _bwd_kernel_dk_dv(
-        dk, dv,
-        Q, k, v, sm_scale,
-        DO,
-        M, D,
-        stride_tok, stride_d,
-        H, N_CTX,
-        BLOCK_M1, BLOCK_N1, BLOCK_DMODEL,
-        start_n, start_m, num_steps,
-        MASK=False
-    )
-
-    DV_block_ptrs = tl.make_block_ptr(
-        base=DV,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_n, 0),
-        block_shape=(BLOCK_N1, BLOCK_DMODEL),
-        order=(1,0)
-    )
-    tl.store(DV_block_ptrs, dv.to(v.dtype))
-
-    # Write back dK.
-    dk *= sm_scale
-    DK_block_ptrs = tl.make_block_ptr(
-        base=DK,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_n, 0),
-        block_shape=(BLOCK_N1, BLOCK_DMODEL),
-        order=(1,0)
-    )
-    tl.store(DK_block_ptrs, dk.to(k.dtype))
-
-    # THIS BLOCK DOES DQ:
-    start_m = pid * BLOCK_M2
-    end_n = start_m + BLOCK_M2
-
-    MASK_BLOCK_N2: tl.constexpr = BLOCK_N2 // BLK_SLICE_FACTOR
-    offs_m = start_m + tl.arange(0, BLOCK_M2)
-
-    Q_block_ptr = tl.make_block_ptr(
-        base=Q,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_m, 0),
-        block_shape=(BLOCK_M2, BLOCK_DMODEL),
-        order=(1, 0)
-    )
-
-    DO_block_ptr = tl.make_block_ptr(
-        base=DO,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_m, 0),
-        block_shape=(BLOCK_M2, BLOCK_DMODEL),
-        order=(1, 0)
-    )
-    q = tl.load(Q_block_ptr)
-    do = tl.load(DO_block_ptr)
-    dq = tl.zeros([BLOCK_M2, BLOCK_DMODEL], dtype=tl.float32)
-
-    m = tl.load(M + offs_m)
-    m = m[:, None]
-
-    # Compute dQ for masked (diagonal) blocks.
-    # NOTE: This code scans each row of QK^T backward (from right to left,
-    # but inside each call to _attn_bwd_dq, from left to right), but that's
-    # not due to anything important.  I just wanted to reuse the loop
-    # structure for dK & dV above as much as possible.
-    num_steps = BLOCK_M2 // MASK_BLOCK_N2
-    dq = _bwd_kernel_dq(dq, q, K, V,
-                      do, m, D,
-                      stride_tok, stride_d,
-                      H, N_CTX,
-                      BLOCK_M2, MASK_BLOCK_N2, BLOCK_DMODEL,
-                      start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps,
-                      MASK=True
-                      )
-    end_n -= num_steps * MASK_BLOCK_N2
-    # stage 2
-    num_steps = end_n // BLOCK_N2
-    dq = _bwd_kernel_dq(dq, q, K, V,
-                      do, m, D,
-                      stride_tok, stride_d,
-                      H, N_CTX,
-                      BLOCK_M2, BLOCK_N2, BLOCK_DMODEL,
-                      start_m, end_n - num_steps * BLOCK_N2, num_steps,
-                      MASK=False
-                      )
-    # Write back dQ.
-    DQ_block_ptr = tl.make_block_ptr(
-        base=DQ,
-        shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
-        offsets=(start_m, 0),
-        block_shape=(BLOCK_M2, BLOCK_DMODEL),
-        order=(1, 0)
-    )
-    dq *= LN2
-    tl.store(DQ_block_ptr, dq.to(q.dtype))
-        
-empty = torch.empty(128, device="cuda")
-
-
 class _attention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
@@ -1041,68 +674,17 @@ class _attention(torch.autograd.Function):
             BATCH_SIZE= q.shape[0]
         )
 
-        ctx.save_for_backward(q, k, v, o, M)
-        ctx.grid = grid
-        ctx.sm_scale = metadata.sm_scale
-        ctx.BLOCK_DMODEL = head_size
-        ctx.causal = metadata.causal
-        ctx.dropout_p = metadata.dropout_p
-        ctx.philox_seed = philox_seed
-        ctx.philox_offset = philox_offset
-        ctx.encoded_softmax = encoded_softmax
-        ctx.return_encoded_softmax = metadata.return_encoded_softmax
+        # ctx.save_for_backward(q, k, v, o, M)
+        # ctx.grid = grid
+        # ctx.sm_scale = metadata.sm_scale
+        # ctx.BLOCK_DMODEL = head_size
+        # ctx.causal = metadata.causal
+        # ctx.dropout_p = metadata.dropout_p
+        # ctx.philox_seed = philox_seed
+        # ctx.philox_offset = philox_offset
+        # ctx.encoded_softmax = encoded_softmax
+        # ctx.return_encoded_softmax = metadata.return_encoded_softmax
         return o, encoded_softmax
-
-    @staticmethod
-    def backward(ctx, do, _):
-        if torch.version.hip is not None:
-            BLOCK = 64
-        else:
-            BLOCK = 128
-        q, k, v, o, M = ctx.saved_tensors
-        assert do.is_contiguous()
-        assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
-        seqlen_q = q.shape[2]
-        dq = torch.empty_like(q)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
-        BATCH, N_HEAD, N_CTX = q.shape[:3]
-        PRE_BLOCK = 128
-        NUM_WARPS, NUM_STAGES = 4, 1
-        BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
-        BLK_SLICE_FACTOR = 2
-        RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
-        arg_k = k
-        arg_k = arg_k * (ctx.sm_scale * RCP_LN2)
-        assert N_CTX % PRE_BLOCK == 0
-        delta = torch.empty_like(M)
-        Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
-        padded_head = (Lk != ctx.BLOCK_DMODEL)
-        grid_preprocess = (triton.cdiv(do.shape[2], BLOCK), do.shape[1], do.shape[0])
-        _attn_bwd_preprocess[grid_preprocess](
-            o, do, delta,
-            o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-            do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-            seqlen_q,
-            head_dim=Lk,
-            BLOCK_M=BLOCK, D_HEAD=ctx.BLOCK_DMODEL,
-        )
-        grid = lambda META: (
-            triton.cdiv(N_CTX, META['BLOCK_N1']),
-            1,
-            BATCH * N_HEAD
-        )
-        _attn_bwd[grid](
-            q, arg_k, v, ctx.sm_scale, do, dq, dk, dv,
-            M, delta,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            N_HEAD, N_CTX,
-            BLOCK_DMODEL=ctx.BLOCK_DMODEL,
-            BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1, BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,
-            BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
-        )
-
-        return dq, dk, dv, None, None
 
 attention = _attention.apply
 
@@ -1145,15 +727,10 @@ def test_op_fwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, dtype=torch.f
     q = torch.randn((Z, H, N_CTX_Q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
     k = torch.randn((Z, H, N_CTX_K, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
     v = torch.randn((Z, H, N_CTX_K, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    if TORCH_HAS_FP8E5:
-        q = q.to(torch_dtype)
-        k = k.to(torch_dtype)
-    o = torch.empty_like(q)
 
-    # triton implementation
-    tri_out, _ = attention(q, k, v, o, input_metadata)
+    o = torch.empty_like(q, dtype=v.dtype)
+
     # reference implementation:171
-
     scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * sm_scale
     if causal:
         mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"), 
@@ -1175,6 +752,12 @@ def test_op_fwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, dtype=torch.f
         nan_mask = torch.isnan(p)
         p[nan_mask==1] = 0
     ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
+    
+    if TORCH_HAS_FP8E5:
+        q = q.to(torch_dtype)
+        k = k.to(torch_dtype)
+    # triton implementation
+    tri_out, _ = attention(q, k, v, o, input_metadata)
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
@@ -1215,13 +798,8 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=tor
     q = torch.randn((Z, H, N_CTX_Q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
     k = torch.randn((Z, H, N_CTX_K, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
     v = torch.randn((Z, H, N_CTX_K, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0., std=0.5).requires_grad_()
-    if TORCH_HAS_FP8E5:
-        q = q.to(torch_dtype)
-        k = k.to(torch_dtype)
-    o = torch.empty_like(q)
+    o = torch.empty_like(q, dtype=v.dtype)
 
-    # triton implementation
-    tri_out, _ = attention(q, k, v, o, input_metadata)
     # reference implementation:171
 
     scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * sm_scale
@@ -1239,6 +817,11 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=tor
         nan_mask = torch.isnan(p)
         p[nan_mask==1] = 0
     ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
+    # triton implementation
+    if TORCH_HAS_FP8E5:
+        q = q.to(torch_dtype)
+        k = k.to(torch_dtype)
+    tri_out, _ = attention(q, k, v, o, input_metadata)
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
@@ -1351,98 +934,6 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
     attention(q, k, v, tri_out, input_metadata)
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
 
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD',
-                         [(4, 48, 1024, 64),
-                          (4, 48, 2048, 64),
-                          (4, 48, 4096, 64),
-                          (1, 16, 1024, 64),
-                          (1, 16, 1024, 128),
-                          #(1, 16, 8192, 63),
-                          #(1, 16, 1022, 64),
-                          ])
-@pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
-@pytest.mark.parametrize('torch_sdpa_test', [True])
-@pytest.mark.parametrize('causal', [True])
-def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, dtype=torch.float16):
-    torch.manual_seed(20)
-    if qseqlen_not_equal_kseqlen is not None:
-        seqlen_q = qseqlen_not_equal_kseqlen
-    else:
-        seqlen_q = N_CTX
-    seqlen_k = N_CTX
-
-    if causal and ((N_CTX - 1) & N_CTX):
-        pytest.skip()
-    if causal and seqlen_q != seqlen_k:
-        pytest.skip()
-
-    sm_scale = D_HEAD ** -0.5
-    input_metadata = MetaData(sm_scale=sm_scale)
-    input_metadata.max_seqlens_q = seqlen_q
-    input_metadata.max_seqlens_k = seqlen_k
-
-    dropout_p = 0
-    q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    o = torch.empty_like(q)
-    
-    if causal:
-        input_metadata.need_causal()
-
-    dout = torch.randn_like(q)
-    # reference implementation
-    if torch_sdpa_test:
-        ref_out, ref_softmax = torch.ops.aten._scaled_dot_product_attention_math(q, k, v,
-                                                                                 dropout_p=dropout_p,
-                                                                                 is_causal=causal,
-                                                                                 scale=sm_scale,
-                                                                                 dropout_mask=None)
-        ref_out.backward(dout.to(device=ref_out.device, dtype=ref_out.dtype))
-        ref_dv, v.grad = v.grad.clone(), None
-        ref_dk, k.grad = k.grad.clone(), None
-        ref_dq, q.grad = q.grad.clone(), None
-    else:
-        M = torch.tril(torch.ones((seqlen_q, seqlen_k), device="cuda"))
-        p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-        if causal:
-            p[:, :, M == 0] = float("-inf")
-        p = torch.softmax(p.float(), dim=-1).type(dtype=p.dtype)
-        ref_out = torch.matmul(p, v)
-        ref_out.backward(dout)
-        ref_dv, v.grad = v.grad.clone(), None
-        ref_dk, k.grad = k.grad.clone(), None
-        ref_dq, q.grad = q.grad.clone(), None
-
-    # # triton implementation
-    tri_out, _ = attention(q, k, v, o, input_metadata)
-    tri_out.backward(dout)
-    tri_dv, v.grad = v.grad.clone(), None
-    tri_dk, k.grad = k.grad.clone(), None
-    tri_dq, q.grad = q.grad.clone(), None
-    # test
-    #print("reference")
-    #print(ref_dv)
-    #print("tri")
-    #print(tri_dv)
-    # compare
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
-    # The current block size for MI200 series is 64x64. This results in
-    # larger differences in float results due to rounding.
-
-    if dtype == torch.bfloat16:
-        ATOL = 1e-1 * max(1.0, (seqlen_q + D_HEAD) / 64.0)
-    if dtype == torch.float32:
-        ATOL = 1e-3 * max(1.0, (seqlen_q + D_HEAD) / 64.0)
-    else:
-        ATOL = 1e-1 * max(1.0, (seqlen_q + D_HEAD) / 64.0)
-
-    RTOL = 0
-
-    torch.testing.assert_close(ref_dv, tri_dv, atol=ATOL, rtol=RTOL)
-    torch.testing.assert_close(ref_dk, tri_dk, atol=ATOL, rtol=RTOL)
-    torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
-
 def nonvarlen_benchmark_configs():
     configs=[(16, 16, 16, 1024, 1024),
             (8, 16, 16, 2048, 2048),
@@ -1525,7 +1016,7 @@ def run_benchmark(custom):
     def bench_flash_attention(
         BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, causal, mode, provider, device="cuda"
     ):
-        assert mode in ["fwd", "bwd"]
+        assert mode in ["fwd"]
         warmup = 25
         rep = 100
         # TODO: Enable bias after testing.
@@ -1535,10 +1026,6 @@ def run_benchmark(custom):
         # else:
         #     bias = None
         bias = None
-
-        # Bwd pass only supports causal=True right now
-        if mode == 'bwd':
-            causal = True
 
         flops_per_matmul = 0
         if varlen:
@@ -1555,17 +1042,13 @@ def run_benchmark(custom):
             input_metadata.need_causal()
         o = torch.empty_like(q)
         fn = lambda: attention(q, k, v, o, input_metadata)
-        if mode == 'bwd':
-            o, _ = fn()
-            do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
+
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
         total_flops = 2 * flops_per_matmul
         # TODO: This needs to be fixed for unequal Q/K seqlens
         if causal:
             total_flops *= 0.5
-        if mode == "bwd":
-            total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
+
         if print_time:
             return ms
         else:
