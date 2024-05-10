@@ -44,7 +44,7 @@ TORCH_HAS_FP8E5 = hasattr(torch, 'float8_e5m2')
 if TORCH_HAS_FP8E5:
     torch_dtype:tl.constexpr = torch.float8_e5m2
 
-DEFAULT_PADDING_OPTION="" # FIXME: Temporary solution for FP8
+DEFAULT_PADDING_OPTION:tl.constexpr="" # FIXME: Temporary solution for FP8
 
 class MetaData():
     cu_seqlens_q = None
@@ -295,7 +295,7 @@ def _attn_fwd_inner(
        #triton.Config({'BLOCK_M': 16,  'BLOCK_N': 16,  'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
    ],
    key=['hq', 'hk', 'IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
-#    use_cuda_graph=True,
+   use_cuda_graph=True,
 )
 @triton.jit
 def attn_fwd(
