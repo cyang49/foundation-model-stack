@@ -587,7 +587,7 @@ class _attention(torch.autograd.Function):
             assert(metadata.bias.numel() < 2 ** 31)    
 
         if o is None:
-            o = torch.empty_like(q, dtype=v.dtype)
+            o = torch.empty_like(q, dtype=torch.float16 if v.dtype==torch_dtype else v.dtype)
         metadata.check_args(q, k, v, o)
         if metadata.varlen:
             total_q, nheads_q, head_size = q.shape
