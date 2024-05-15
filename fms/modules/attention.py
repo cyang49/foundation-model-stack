@@ -22,7 +22,7 @@ except:
     pass
 USE_FLASHINFER_FP8_DECODE=False and HAS_FLASHINFER
 
-USE_FP8_FUSED_ATTN=False
+USE_FP8_FUSED_ATTN=False # turn this on if testing fp8 attn kernels
 USE_OPENAI_FUSED_ATTN = False
 USE_IBM_FUSED_ATTN = False
 USE_ROCM_FUSED_ATTN = True # produces legible results on nv H100
@@ -215,8 +215,8 @@ class MultiHeadAttention(nn.Module):
         if USE_FP8_FUSED_ATTN:
             queries = queries.to(torch.float8_e5m2)
             keys_e = keys_e.to(torch.float8_e5m2)
-            # values_e = values_e.to(torch.float8_e5m2)
-            values_e = values_e.to(torch.float16)
+            values_e = values_e.to(torch.float8_e5m2)
+            # values_e = values_e.to(torch.float16)
         if attn_algorithm == "triton":
             sm_scale = queries.shape[-1] ** -0.5
             new_kv_seq_len = kv_seq_len = keys_e.shape[2]
