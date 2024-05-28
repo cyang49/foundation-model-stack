@@ -64,8 +64,8 @@ parser.add_argument(
 parser.add_argument(
     "--fp8_linear_type",
     type=str,
-    default='dasw',
-    choices=['dadw', 'dasw', 'sw', 'ns'],
+    default='dasw2',
+    choices=['dasw', 'dasw2', 'sw', 'ns'],
     help="Choose the float8 linear type",
 )
 parser.add_argument(
@@ -168,13 +168,14 @@ prefill_model = model
 decode_model = model
 
 if args.fp8:
-    from float8_experimental.float8_linear import Float8Linear, Float8DASWLinear, Float8SWLinear
+    from float8_experimental.float8_linear import Float8Linear, Float8DASWLinear, Float8DASWLinear2, Float8SWLinear
     from float8_experimental.float8_linear_utils import (
         swap_linear_with_float8_linear,
     )
     fp8LinearDict = {
-        'dadw': Float8Linear,
+        # 'dadw': Float8Linear,
         'dasw': Float8DASWLinear,
+        'dasw2': Float8DASWLinear2,
         'sw':   Float8SWLinear,
         'ns':   None,
     }
