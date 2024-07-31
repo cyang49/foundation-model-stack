@@ -286,9 +286,88 @@ def get_model(
             )
 
     # Create the model
+    # fms_model = _get_model_instance(
+    #     architecture, variant, device=initial_device, extra_args=extra_args
+    # )
+    # HACK: use meta device
     fms_model = _get_model_instance(
-        architecture, variant, device=initial_device, extra_args=extra_args
+        architecture, variant, device=torch.device("meta"), extra_args=extra_args
     )
+    
+    # HACK: FP8 linear layers
+    # For quantized models, replace linear layers with quantized linear
+    # layer implemenations
+    # NOTE: This doesn't apply to the use case when quantization is applied
+    #       to fp16 weights after loading. In that case, a layer by layer
+    #       conversion workflow may be needed to keep the memory footprint
+    #       smaller
+    is_fp8 = True
+    if is_fp8:
+        from float8_experimental.inference import (ActivationCasting, QuantConfig, Float8InferenceLinear)
+        from float8_experimental.float8_linear_utils import swap_linear_layers
+        from float8_experimental.float8_tensor import (
+            LinearMMConfig,
+            ScaledMMConfig,
+        )
+        use_fast_accum = True
+        # SASW only for now
+        quant_config = QuantConfig(
+                    activation_casting=ActivationCasting.STATIC,
+                    static_quantization_scale=torch.tensor(
+                        1.0, dtype=torch.float32, device=initial_device
+                    ),
+                )
+
+        # skip_fqn_list_llama_2 = [f"layers.{i}.ff_sub_layer.w2" for i in [1, 30]] + [
+        #     "shared.head"
+        # ]
+        # skip_fqn_list = skip_fqn_list_llama_2
+        skip_fqn_list = ['shared.head']
+
+        # NOTE: QuantizedLinear should be a specialized linear layer e.g. Float8Linear and GPTQLinear
+        #       The assumptions are 
+        #           (1) only 1 type of quantize linear is used
+        #           (2) only exceptions are skip_fqn_list
+        #       They should have implementations for 
+        #           (1) loading quantized weights and quantization parameters
+        #           (2) forward function implementation        
+        # for createing a Float8InferenceLinear using meta tensor
+        def to_fp8_linear(module, quant_config, use_fast_accum=True):
+            forward_config = ScaledMMConfig(
+                False, use_fast_accum, pad_inner_dim=quant_config.pad_inner_dim
+            )
+            linear_mm_config = LinearMMConfig(
+                forward_config, forward_config, forward_config
+            )
+            linear = Float8InferenceLinear(
+                quant_config,
+                linear_mm_config,
+                # NOTE: not sharded sizes
+                module.in_features,
+                module.out_features,
+                False, # bias
+                device=initial_device, # FIXME: makes more sense to use meta device here but keep getting issues. Set to cuda for now
+            )
+            # Need Float8Tensor type placeholder for weight and create scale placeholder
+            linear.set_weight_and_bias(module.weight, module.bias)
+            linear.quantize_weight()
+            # at this point every parameter is still on the meta device
+            print(f"{linear.weight=}") # Float8Tensor
+            print(f"{linear.bias=}")   # Original bias
+            return linear
+            
+        if quant_config is not None:
+            fms_model = swap_linear_layers(
+                fms_model,
+                lambda m: to_fp8_linear(m, quant_config, use_fast_accum=True), # memory is allocated on device at this point
+                module_filter_fn=lambda m, fqn: (not any([(x in fqn) for x in skip_fqn_list])),
+            )
+        print(f"{fms_model=}")
+        for name, param in fms_model.named_parameters():
+            print(name)
+            
+
+    # At this point the model instance is created on the meta device without weight values
 
     # Choose when to wrap and load the model weights based on the combination
     # distribution strategy and checkpoint sharding
@@ -304,18 +383,21 @@ def get_model(
     if not pre_load:
         fms_model = model_wrap(fms_model)
 
-    if len(lazy_sd):
-        serialization.load_state_dict_into_model(
-            fms_model,
-            lazy_sd,
-            architecture,
-            source if source is not None else "fms",
-            distributed_strategy,
-            checkpoint_sharding,
-            initial_device,
-        )
-    elif hasattr(fms_model, "reset_parameters"):
-        fms_model.reset_parameters()
+    # HACK skip loading weight
+    fms_model.to_empty(device=initial_device)
+
+    # if len(lazy_sd):
+    #     serialization.load_state_dict_into_model(
+    #         fms_model,
+    #         lazy_sd,
+    #         architecture,
+    #         source if source is not None else "fms",
+    #         distributed_strategy,
+    #         checkpoint_sharding,
+    #         initial_device,
+    #     )
+    # elif hasattr(fms_model, "reset_parameters"):
+    #     fms_model.reset_parameters()
 
     if pre_load:
         fms_model = model_wrap(fms_model)

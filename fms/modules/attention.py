@@ -244,6 +244,7 @@ class FusedQKV(QKV):
             qkv = q
         else:
             raise ValueError("q, k, and v must be the same or k and v must be None")
+        print(self.qkv_fused.weight)
         return self.qkv_fused(qkv).split(self.splits, dim=-1)
 
 

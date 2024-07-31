@@ -20,7 +20,7 @@ from typing import (
 import torch
 
 from fms.modules.tp import TPModule
-
+from float8_experimental import Float8Tensor
 
 __adapters: MutableMapping[str, MutableMapping[str, Callable[[Mapping], Mapping]]] = {}
 
@@ -106,9 +106,28 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
                 f"attn.in_proj.qkv_fused.{weight_type}",
                 name,
             )
-            new_sd[new_name] = torch.cat(
-                [orig_sd.pop(w) for w in unfused_weights], dim=0
-            )
+            print(f"{new_name=}")
+            # HACK: for fp8 to avoid unsupported torch.cat            
+            # new_sd[new_name] = torch.cat(
+            #     [orig_sd.pop(w) for w in unfused_weights], dim=0
+            # )
+            unfused_list = [orig_sd.pop(w) for w in unfused_weights]
+            if len(unfused_list) > 0:
+                if len(unfused_list[0].shape) == 0: # scalar scale tensor
+                    # HACK: make scale tensor the avg of the scales of the fused layers 
+                    # TODO: expand into fused per channel scale tensor
+                    new_sd[new_name] = torch.mean(torch.stack(unfused_list))
+                else:
+                    if unfused_list[0].dtype == torch.float8_e4m3fn:
+                        orig_device = unfused_list[0].device
+                        # concatenate on cpu
+                        unfused_list = [w.to('cpu') for w in unfused_list]
+                        new_sd[new_name] = torch.cat(unfused_list, dim=0).to(orig_device)
+                    else:
+                        new_sd[new_name] = torch.cat(
+                            unfused_list, dim=0
+                        )
+
         else:
             new_sd[name] = orig_sd.pop(name)
     return new_sd
@@ -149,9 +168,27 @@ def _legacy_mlp_glu_unfused_to_fused_adapter(orig_sd):
                 f"ff_sub_layer.wg1_fused.{weight_type}",
                 name,
             )
-            new_sd[new_name] = torch.cat(
-                [orig_sd.pop(w) for w in unfused_weights], dim=0
-            )
+            # HACK: for fp8 to avoid unsupported torch.cat
+            # new_sd[new_name] = torch.cat(
+            #     [orig_sd.pop(w) for w in unfused_weights], dim=0
+            # )
+            # Work around fusing fp8 weights
+            unfused_list = [orig_sd.pop(w) for w in unfused_weights]
+            if len(unfused_list) > 0:
+                if len(unfused_list[0].shape) == 0: # scalar scale tensor
+                    # HACK: make scale tensor the avg of the scales of the fused layers 
+                    # TODO: expand into fused per channel scale tensor
+                    new_sd[new_name] = torch.mean(torch.stack(unfused_list))
+                else:
+                    if unfused_list[0].dtype == torch.float8_e4m3fn:
+                        orig_device = unfused_list[0].device
+                        # concatenate on cpu
+                        unfused_list = [w.to('cpu') for w in unfused_list]
+                        new_sd[new_name] = torch.cat(unfused_list, dim=0).to(orig_device)
+                    else:
+                        new_sd[new_name] = torch.cat(
+                            unfused_list, dim=0
+                        )
         else:
             new_sd[name] = orig_sd.pop(name)
     return new_sd
@@ -450,6 +487,7 @@ def _load_partial_state_dict(
     unused_params = []
     seen_tp_modules = set()
     for key, tensor_value in state_dict.items():
+        print(f"{key=}")
         target_module = model
         # Find where to put the weight and decide whether it needs TP'ing
         key_steps = key.split(".")
@@ -484,7 +522,18 @@ def _load_partial_state_dict(
             # into the model
             if not needs_tp_sharding or tp_module is None:
                 param = getattr(target_module, key_steps[-1])
-                param.copy_(tensor_value, non_blocking=True)
+                # HACK: fp8 handling
+                if isinstance(param, Float8Tensor):
+                    assert tensor_value.dtype == torch.float8_e4m3fn
+                    print(f"{param=}")
+                    print(f"{param.dtype=}")
+                    print(f"{param.data.dtype=}")
+                    # print(f"{tensor_value=}")
+                    # print(f"{tensor_value.shape=}")
+                    # print(f"{tensor_value.dtype=}")
+                    param._data.copy_(tensor_value, non_blocking=True)
+                else:
+                    param.copy_(tensor_value, non_blocking=True)
             elif tp_module is not None and tp_module not in seen_tp_modules:
                 seen_tp_modules.add(tp_module)
                 tensor_values = {k: v for k, v in state_dict.items() if tp_prefix in k}
