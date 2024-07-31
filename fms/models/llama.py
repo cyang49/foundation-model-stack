@@ -554,20 +554,21 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
         # that HF does from the original Meta weights:
         if bool(trans_required_pattern.match(new_name)):
             temp = new_sd[new_name]
-            # nheads is used in the transformation required for hf->fms
-            if temp.size(0) == 2560:
-                head_size = 80  # granite 3b code
-            else:
-                head_size = 128  # every other Llama model in existence
-            nheads = int(temp.size(0) / head_size)
+            if len(temp.shape) > 0: # excluding scalar scale 
+                # nheads is used in the transformation required for hf->fms
+                if temp.size(0) == 2560:
+                    head_size = 80  # granite 3b code
+                else:
+                    head_size = 128  # every other Llama model in existence
+                nheads = int(temp.size(0) / head_size)
 
-            if temp.dim() == 2:  # weight
-                temp_view = temp.view(nheads, 2, -1, temp.size(1))
-            else:  # bias
-                temp_view = temp.view(nheads, 2, -1)
-            temp = temp_view.transpose(1, 2).reshape(*temp.size())
+                if temp.dim() == 2:  # weight
+                    temp_view = temp.view(nheads, 2, -1, temp.size(1))
+                else:  # bias
+                    temp_view = temp.view(nheads, 2, -1)
+                temp = temp_view.transpose(1, 2).reshape(*temp.size())
 
-            new_sd[new_name] = temp
+                new_sd[new_name] = temp
 
     fused_sd = _convert_to_fused(new_sd)
 
