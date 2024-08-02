@@ -20,7 +20,7 @@ from typing import (
 import torch
 
 from fms.modules.tp import TPModule
-from float8_experimental import Float8Tensor
+from torchao.float8 import Float8Tensor
 
 __adapters: MutableMapping[str, MutableMapping[str, Callable[[Mapping], Mapping]]] = {}
 
