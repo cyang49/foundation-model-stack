@@ -289,9 +289,10 @@ def get_model(
     # fms_model = _get_model_instance(
     #     architecture, variant, device=initial_device, extra_args=extra_args
     # )
-    # HACK: use meta device
+    # HACK: should use meta device
     fms_model = _get_model_instance(
-        architecture, variant, device=torch.device("meta"), extra_args=extra_args
+        architecture, variant, device=initial_device, extra_args=extra_args
+        # architecture, variant, device=torch.device("meta"), extra_args=extra_args
     )
     
     # HACK: FP8 linear layers
@@ -353,7 +354,7 @@ def get_model(
             linear.quantize_weight()
             # at this point every parameter is still on the meta device
             print(f"{linear.weight=}") # Float8Tensor
-            print(f"{linear.bias=}")   # Original bias
+            # print(f"{linear.bias=}")   # Original bias
             return linear
             
         if quant_config is not None:
