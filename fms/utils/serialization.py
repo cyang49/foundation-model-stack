@@ -106,7 +106,7 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
                 f"attn.in_proj.qkv_fused.{weight_type}",
                 name,
             )
-            print(f"{new_name=}")
+            # print(f"{new_name=}")
             # HACK: for fp8 to avoid unsupported torch.cat            
             # new_sd[new_name] = torch.cat(
             #     [orig_sd.pop(w) for w in unfused_weights], dim=0
@@ -487,7 +487,7 @@ def _load_partial_state_dict(
     unused_params = []
     seen_tp_modules = set()
     for key, tensor_value in state_dict.items():
-        print(f"{key=}")
+        # print(f"{key=}")
         target_module = model
         # Find where to put the weight and decide whether it needs TP'ing
         key_steps = key.split(".")
@@ -525,9 +525,9 @@ def _load_partial_state_dict(
                 # HACK: fp8 handling
                 if isinstance(param, Float8Tensor):
                     assert tensor_value.dtype == torch.float8_e4m3fn
-                    print(f"{param=}")
-                    print(f"{param.dtype=}")
-                    print(f"{param.data.dtype=}")
+                    # print(f"{param=}")
+                    # print(f"{param.dtype=}")
+                    # print(f"{param.data.dtype=}")
                     # print(f"{tensor_value=}")
                     # print(f"{tensor_value.shape=}")
                     # print(f"{tensor_value.dtype=}")

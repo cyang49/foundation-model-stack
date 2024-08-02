@@ -311,14 +311,21 @@ def get_model(
             ScaledMMConfig,
         )
         use_fast_accum = True
-        # SASW only for now
-        quant_config = QuantConfig(
-                    activation_casting=ActivationCasting.STATIC,
-                    static_quantization_scale=torch.tensor(
-                        1.0, dtype=torch.float32, device=initial_device
-                    ),
-                )
+        # # SASW only for now
+        # quant_config = QuantConfig(
+        #     activation_casting=ActivationCasting.STATIC,
+        #     static_quantization_scale=torch.tensor(
+        #         1.0, dtype=torch.float32, device=initial_device
+        #     ),
+        # )
 
+        # DASW with activation scale upperbound
+        quant_config = QuantConfig(
+                activation_casting=ActivationCasting.DYNAMIC,
+                dynamic_activation_scale_ub=torch.tensor(
+                1200.0, dtype=torch.float32, device=initial_device
+            ),
+        )
         # skip_fqn_list_llama_2 = [f"layers.{i}.ff_sub_layer.w2" for i in [1, 30]] + [
         #     "shared.head"
         # ]
@@ -353,7 +360,7 @@ def get_model(
             linear.set_weight_and_bias(module.weight, module.bias)
             linear.quantize_weight()
             # at this point every parameter is still on the meta device
-            print(f"{linear.weight=}") # Float8Tensor
+            # print(f"{linear.weight=}") # Float8Tensor
             # print(f"{linear.bias=}")   # Original bias
             return linear
             
